@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Color Sort (Touch Fun)</title>
+<style>
+  * { box-sizing:border-box; }
+  html, body { margin:0; min-height:100%; background:#111; color:#fff; font-family:sans-serif; touch-action:manipulation; }
+  body { display:flex; flex-direction:column; align-items:center; gap:8px; padding:10px 10px 16px; }
+  #title { font-size:24px; font-weight:bold; text-align:center; }
+  #instruction { font-size:16px; text-align:center; min-height:20px; }
+  #currentScore { font-size:44px; font-weight:bold; color:#ff0; line-height:1; }
+  #scoreboard {
+    font-size:15px; background:#0008; padding:8px 12px; border-radius:8px; line-height:1.4;
+    font-weight:bold; text-align:center; width:min(96vw,600px);
+  }
+  canvas {
+    width:min(96vw,600px); aspect-ratio:1/1; height:auto; background:#222;
+    border:2px solid #444; border-radius:10px; touch-action:none; display:block;
+  }
+  #buttons { display:flex; gap:10px; }
+  .btn { background:#444; color:#fff; border:none; border-radius:6px; padding:12px 20px; font-size:16px; cursor:pointer; }
+  .btn:hover { background:#666; }
+  .btn:focus-visible { outline:3px solid #ff0; }
+</style>
+</head>
+<body>
+<div id="title">MATCH THE COLOUR</div>
+<div id="instruction">Tap the corner that matches the centre block, or tap DUMP</div>
+<div id="currentScore">Score: 0</div>
+<div id="scoreboard"></div>
+<canvas id="game" width="600" height="600"></canvas>
+<div id="buttons">
+  <button class="btn" id="helpBtn" aria-label="Show instructions">?</button>
+  <button class="btn" id="pauseBtn">Pause</button>
+  <button class="btn" id="quitBtn">Restart</button>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+// Paste your Render API address here, e.g. "https://color-sort-api.onrender.com"
+// Leave empty to keep scores on this device only.
+const API_URL = "";
+
+const board = document.getElementById('scoreboard');
+const currentScoreDiv = document.getElementById('currentScore');
+const instruction = document.getElementById('instruction');
+const pauseBtn = document.getElementById('pauseBtn');
+const quitBtn = document.getElementById('quitBtn');
+const helpBtn = document.getElementById('helpBtn');
+
+// ---- storage helpers (safe if storage is blocked) ----
+function load(key, fallback){
+  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch(e){ return fallback; }
+}
+function save(key, value){
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch(e){}
+}
+
+// ---- player: always asked on load and on Restart ----
+let username = "Player";
+let highScores = load("colorSortHighscores", {});
+let hsTimer = load("colorSortTimer", {});
+
+function askName(){
+  const last = load("colorSortName", "");
+  const typed = prompt("Enter your name:", last);
+  username = (typed || "").trim().slice(0,20) || last || "Player";
+  save("colorSortName", username);
+  if(typeof highScores[username] !== "number") highScores[username] = 0;
+}
+
+// ---- colours, each with its own symbol so colour is never the only clue ----
+const COLORS = [
+  { name:"red",    hex:"#e53935", sym:"circle"  },
+  { name:"blue",   hex:"#1e88e5", sym:"square"  },
+  { name:"green",  hex:"#43a047", sym:"triangle"},
+  { name:"yellow", hex:"#fdd835", sym:"diamond" },
+  { name:"purple", hex:"#8e24aa", sym:"plus"    },
+  { name:"orange", hex:"#fb8c00", sym:"star"    },
+  { name:"cyan",   hex:"#00bcd4", sym:"hex"     },
+  { name:"pink",   hex:"#f48fb1", sym:"bar"     }
+];
+const POS = ["tl","tr","bl","br"];
+const boxSize = 120;
+let cornerColors = {};
+let currentColor = null;
+
+// ---- state ----
+let score, elapsed, paused, flash;
+
+function newGame(){
+  score = 0;
+  elapsed = 0;
+  paused = false;
+  flash = null;
+  pauseBtn.innerText = "Pause";
+  reshuffle();
+  renderScore();
+}
+
+function reshuffle(){
+  const pool = COLORS.slice().sort(()=>Math.random()-0.5);
+  POS.forEach((p,i)=>{ cornerColors[p] = pool[i]; });
+  currentColor = COLORS[Math.floor(Math.random()*COLORS.length)];
+}
+
+function formatTime(ms){
+  const total = Math.floor(ms/1000);
+  const h = Math.floor(total/3600), m = Math.floor((total%3600)/60), sec = total%60;
+  return (h ? h + "h " : "") + m + "m " + sec + "s";
+}
+
+let remote = [];      // shared leaderboard from the server
+let dirty = false;    // personal best not yet sent
+
+function leaderboard(){
+  const map = {};
+  if(API_URL){
+    remote.forEach(r => { map[r.name] = { score:r.score, ms:r.ms }; });
+    const mine = map[username];
+    if(!mine || highScores[username] > mine.score){
+      map[username] = { score:highScores[username], ms:hsTimer[username] || 0 };
+    }
+  } else {
+    Object.keys(highScores).forEach(u => { map[u] = { score:highScores[u], ms:hsTimer[u] || 0 }; });
+  }
+  return Object.entries(map)
+    .map(([name,v]) => ({ name, score:v.score, ms:v.ms }))
+    .filter(r => r.score > 0)
+    .sort((x,y) => y.score - x.score || x.ms - y.ms)
+    .slice(0,5);
+}
+
+function renderScore(){
+  currentScoreDiv.innerText = `Score: ${score}`;
+  const rows = leaderboard().map((r,i) =>
+    `${i+1}. ${escapeHtml(r.name)} ${r.score} (${formatTime(r.ms)})`).join("<br>");
+  board.innerHTML =
+    `<strong>${escapeHtml(username)}</strong> &nbsp;|&nbsp; Time: ${formatTime(elapsed)} &nbsp;|&nbsp; High: ${highScores[username]}` +
+    `<hr style="margin:6px 0;border-color:#888"><strong>Top players${API_URL ? "" : " (this device)"}</strong><br>${rows || "No scores yet"}`;
+}
+
+async function fetchBoard(){
+  if(!API_URL) return;
+  try {
+    const r = await fetch(API_URL + "/scores");
+    if(!r.ok) return;
+    remote = await r.json();
+    const mine = remote.find(x => x.name === username);
+    if(mine && mine.score > highScores[username]){
+      highScores[username] = mine.score;
+      hsTimer[username] = mine.ms;
+      save("colorSortHighscores", highScores);
+      save("colorSortTimer", hsTimer);
+    }
+    renderScore();
+  } catch(e){}
+}
+
+async function flushScore(){
+  if(!API_URL || !dirty) return;
+  dirty = false;
+  try {
+    const r = await fetch(API_URL + "/scores", {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ name:username, score:highScores[username], ms:Math.floor(hsTimer[username] || 0) }),
+      keepalive: true
+    });
+    if(!r.ok) dirty = true;
+    else fetchBoard();
+  } catch(e){ dirty = true; }
+}
+
+function escapeHtml(t){
+  return t.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function changeScore(delta){
+  score = Math.max(0, score + delta);
+  if(score > highScores[username]){
+    highScores[username] = score;
+    hsTimer[username] = elapsed;
+    save("colorSortHighscores", highScores);
+    save("colorSortTimer", hsTimer);
+    dirty = true;
+  }
+  renderScore();
+}
+
+// ---- drawing ----
+function drawSymbol(sym, cx, cy, r){
+  ctx.save();
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.strokeStyle = "rgba(0,0,0,0.55)";
+  ctx.lineWidth = r*0.28;
+  ctx.beginPath();
+  switch(sym){
+    case "circle":   ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fill(); break;
+    case "square":   ctx.fillRect(cx-r*0.9,cy-r*0.9,r*1.8,r*1.8); break;
+    case "triangle": ctx.moveTo(cx,cy-r); ctx.lineTo(cx+r,cy+r*0.8); ctx.lineTo(cx-r,cy+r*0.8); ctx.closePath(); ctx.fill(); break;
+    case "diamond":  ctx.moveTo(cx,cy-r*1.1); ctx.lineTo(cx+r*0.9,cy); ctx.lineTo(cx,cy+r*1.1); ctx.lineTo(cx-r*0.9,cy); ctx.closePath(); ctx.fill(); break;
+    case "plus":     ctx.moveTo(cx-r,cy); ctx.lineTo(cx+r,cy); ctx.moveTo(cx,cy-r); ctx.lineTo(cx,cy+r); ctx.lineWidth = r*0.5; ctx.stroke(); break;
+    case "star":
+      for(let i=0;i<10;i++){
+        const rad = i%2===0 ? r*1.1 : r*0.45, a = -Math.PI/2 + i*Math.PI/5;
+        ctx[i===0?"moveTo":"lineTo"](cx+Math.cos(a)*rad, cy+Math.sin(a)*rad);
+      }
+      ctx.closePath(); ctx.fill(); break;
+    case "hex":
+      for(let i=0;i<6;i++){
+        const a = Math.PI/6 + i*Math.PI/3;
+        ctx[i===0?"moveTo":"lineTo"](cx+Math.cos(a)*r, cy+Math.sin(a)*r);
+      }
+      ctx.closePath(); ctx.fill(); break;
+    case "bar":      ctx.fillRect(cx-r,cy-r*0.3,r*2,r*0.6); break;
+  }
+  ctx.restore();
+}
+
+function cornerXY(p){
+  return {
+    x: (p==="tl"||p==="bl") ? 0 : canvas.width-boxSize,
+    y: (p==="tl"||p==="tr") ? 0 : canvas.height-boxSize
+  };
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  POS.forEach(p=>{
+    const {x,y} = cornerXY(p), c = cornerColors[p];
+    ctx.fillStyle = c.hex;
+    ctx.fillRect(x,y,boxSize,boxSize);
+    drawSymbol(c.sym, x+boxSize/2, y+boxSize/2, 24);
+    if(flash && flash.pos===p && performance.now() < flash.until){
+      ctx.strokeStyle = flash.ok ? "#00e676" : "#ff1744";
+      ctx.lineWidth = 8;
+      ctx.strokeRect(x+4,y+4,boxSize-8,boxSize-8);
+    }
+  });
+
+  // dump button
+  const dumpFlash = flash && flash.pos==="dump" && performance.now() < flash.until;
+  ctx.fillStyle = dumpFlash ? (flash.ok ? "#00e676" : "#ff1744") : "gray";
+  ctx.fillRect(canvas.width/2-70, canvas.height-60, 140, 50);
+  ctx.fillStyle = "white";
+  ctx.font = "22px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("DUMP", canvas.width/2, canvas.height-28);
+
+  // centre block
+  ctx.fillStyle = currentColor.hex;
+  ctx.fillRect(canvas.width/2-boxSize/2, canvas.height/2-boxSize/2, boxSize, boxSize);
+  drawSymbol(currentColor.sym, canvas.width/2, canvas.height/2, 24);
+
+  if(paused){
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle = "white";
+    ctx.font = "32px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("PAUSED", canvas.width/2, canvas.height/2);
+  }
+}
+
+// ---- input ----
+function buzz(ok){
+  if(navigator.vibrate) navigator.vibrate(ok ? 15 : [40,30,40]);
+}
+
+function handleTap(x,y){
+  if(paused) return;
+
+  const matchPos = POS.find(p => cornerColors[p] === currentColor) || null;
+
+  // dump button
+  if(x > canvas.width/2-70 && x < canvas.width/2+70 && y > canvas.height-60){
+    const ok = (matchPos === null);
+    changeScore(ok ? +1 : -5);
+    flash = { pos:"dump", ok, until:performance.now()+250 };
+    buzz(ok);
+    reshuffle();
+    return;
+  }
+
+  let choice = null;
+  if(x < boxSize && y < boxSize) choice = "tl";
+  else if(x > canvas.width-boxSize && y < boxSize) choice = "tr";
+  else if(x < boxSize && y > canvas.height-boxSize) choice = "bl";
+  else if(x > canvas.width-boxSize && y > canvas.height-boxSize) choice = "br";
+
+  if(choice){
+    const ok = (choice === matchPos);
+    changeScore(ok ? +10 : -10);
+    flash = { pos:choice, ok, until:performance.now()+250 };
+    buzz(ok);
+    reshuffle();
+  }
+}
+
+// pointer events cover touch, mouse and pen; scale handles any screen size
+canvas.addEventListener("pointerdown", e=>{
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  handleTap((e.clientX-r.left)*canvas.width/r.width, (e.clientY-r.top)*canvas.height/r.height);
+});
+
+pauseBtn.addEventListener("click", ()=>{
+  paused = !paused;
+  pauseBtn.innerText = paused ? "Resume" : "Pause";
+});
+
+quitBtn.addEventListener("click", ()=>{
+  newGame();
+});
+
+let helpTimer;
+function showHelp(){
+  instruction.style.display = "block";
+  clearTimeout(helpTimer);
+  helpTimer = setTimeout(()=>{ instruction.style.display = "none"; }, 10000);
+}
+helpBtn.addEventListener("click", showHelp);
+
+// auto-pause when the tab or app is hidden
+document.addEventListener("visibilitychange", ()=>{
+  if(document.hidden) flushScore();
+  if(document.hidden && !paused){ paused = true; pauseBtn.innerText = "Resume"; }
+});
+
+// ---- main loop ----
+let last = performance.now();
+function loop(now){
+  const dt = now - last;
+  last = now;
+  if(!paused){
+    elapsed += dt;
+    renderScore();
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+askName();
+newGame();
+showHelp();
+fetchBoard();
+setInterval(fetchBoard, 15000);
+setInterval(flushScore, 4000);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
